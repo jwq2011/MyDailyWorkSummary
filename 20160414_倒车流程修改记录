@@ -1,0 +1,112 @@
+
+倒车阶段ARM1 → ARM2的消息模式
+
+在android4.2.2\autochips\frameworks\atc\core\libs\backcar\custom\Protocol.cpp中使用的BACKCAR_USE_NEW_START_CODE
+
+autochips\packages\apps\BackCar\src\com\autochips\backcar\BackCarService.java
+android4.2.2\autochips\frameworks\atc\core\java\com\autochips\backcar\BackCar.java
+android4.2.2\autochips\frameworks\atc\core\jni\backcar\BackCar.cpp
+android4.2.2\autochips\frameworks\atc\core\libs\backcar\core\BackCar.cpp
+
+1.autochips\packages\apps\BackCar\src\com\autochips\backcar\
+倒车服务层，倒车的基本逻辑流程都是在此定义的，其在收到系统启动完毕的信息时会自动打开自身的服务。
+在BootCompletedReceiver类中收到BOOT_COMPLETED的intent后，会动一个名为android.intent.action.BACKCAR_SERVICE的服务。而此服务所属的类BackCarService在其方法onStartCommand(Intent intent, int flags, int startId)中经过初始化，并通过不断循环的方式根据当前倒车的状态去选择调用BackCar.start或是BackCar.stop函数。
+
+2.android4.2.2\autochips\frameworks\atc\core\java\com\autochips\backcar\BackCar.java
+定义了一个名为BackCar的服务，该服务向外面暴露了一些直接调用JNI函数的接口，它是JAVA层和JNI层沟通的主要桥梁。
+
+在BackCar类中则实现了包括init, getEvent, nativeStart, nativeStop等native函数接口，在start函数里，主要是调用CBManager做了一下资源的调用，告诉底层现在要显示倒车了。
+public native static int init();
+public native static boolean isARM2Reversing();
+public native static Message getEvent();
+public static void stop();
+public static void reset();
+public static int start() {
+	if (null == gCBM) {
+		gCBM = new CBManager();
+	}
+	Parcel p = Parcel.obtain();
+	int ret = gCBM.requestAsync(CBManager.SRC_BACKCAR, CBManager.BC_ARM1);
+	Log.i(TAG, "***cbm return value is "+ret);
+	Log.i(TAG,"Request cbm (BC_ARM1)");
+	nativeStart();
+
+	return 0;
+}
+private native static int nativeStart();
+
+3.android4.2.2\autochips\frameworks\atc\core\jni\backcar\BackCar.cpp
+JNI层，它主要通过libfsccore文件来调用相关操作，其本身会生成一个名为libbackcar_jni.so的库。
+LOCAL_SHARED_LIBRARIES := \
+    libutils \
+    libnativehelper \
+    libfsccore \
+    libgui \
+    libandroid_runtime
+
+在BackCar类中提到的几个native函数接口(init, getEvent, nativeStart, nativeStop)的对应关系为：
+static JNINativeMethod sMethods[] = {
+	{"init", "()I", (void *) com_autochips_backcar_BackCar_init},
+	{"getEvent", "()Landroid/os/Message;", (void *) com_autochips_backcar_BackCar_getEvent},
+	{"nativeStart", "()I", (void *) com_autochips_backcar_BackCar_nativeStart},
+	{"nativeStop", "()V", (void *) com_autochips_backcar_BackCar_nativeStop},
+};
+
+	1.com_autochips_backcar_BackCar_init → BC_Init();
+	2.com_autochips_backcar_BackCar_getEvent → BC_Wait();
+	3.com_autochips_backcar_BackCar_nativeStart → BC_Start();
+	3.com_autochips_backcar_BackCar_nativeStart → BC_Stop();
+
+
+4.android4.2.2\autochips\frameworks\atc\core\libs\backcar\core\BackCar.cpp
+	4.1 BC_Init() → 
+	4.1.1 BCWaitArm2Fin:(发生消息通知底层)
+		mdevfd = open("/dev/backcardrv", O_RDWR | O_NONBLOCK);
+		ioctl(mdevfd,IOCTL_FSC_NOTIFY_APP_READY,&dwARM2Status)
+	4.1.2 BCUartInit(4,115200):(初始化通讯串口/dev/ttyMT%d)
+
+	4.2 BC_Wait() → 
+		BCWaitProtocolFromUART4:(倒车的服务层是通过ttyMT%d这个串口来感知当前倒车的状态)
+
+5.autochips/frameworks/atc/core/libs/backcar/custom/protocol.cpp
+	BCWaitProtocolFromUART4函数的数据接收实现，来确认客户的倒车状态。
+
+6.autochips\protect\platform\kernel\drivers\backcar\backcar.c
+倒车驱动的做的最主要的事情，便是通过HWSendMessage函数通知ARM2相关信息，比如Android已经运行起来，以及ARM2需要停止倒车等等。
+static int backcar_ioctl( struct file *file, unsigned int cmd, unsigned long arg)
+{
+	if (cmd == IOCTL_FSC_NOTIFY_APP_READY) {
+		HWSendMessage(MSG_COMBINE(MODULE_BCAR, MSG_ANDROID_APP_READY),0, 0, 0);
+	}
+	else if (cmd == IOCTL_FSC_NOTIFY_ARM2_STOP) { 
+        HWSendMessage(MSG_COMBINE(MODULE_BCAR, MSG_NOTIFY_ARM2_STOP),0, 0, 0);
+    }
+}
+
+系统默认用于ARM跟MCU通讯的UART口选择的为UART4
+
+android4.2.2/autochips/device/atc/ac8317/BoardConfig.mk
+#for Backcar Board Config:GPIO/UART4 for Demo and Customer Board Config
+BACKCAR_DATA_SOURCE := UART4
+
+
+android4.2.2/autochips/platform/arm2/backcar/Makefile
+ifeq ($(BACKCAR_DATA_SOURCE), GPIO)
+	CFLAGS += -DGPIO_ENABLE
+endif
+
+ifeq ($(BACKCAR_DATA_SOURCE), UART4)
+	CFLAGS += -DUART4_ENABLE
+endif
+
+
+android4.2.2/autochips/frameworks/atc/core/libs/backcar/Android.mk
+ifeq ($(BACKCAR_DATA_SOURCE), UART4)
+	LOCAL_CPPFLAGS += -DUART4_ENABLE
+endif
+
+ifeq ($(BACKCAR_DATA_SOURCE), GPIO)
+	LOCAL_CPPFLAGS += -DGPIO_ENABLE
+endif
+
+
